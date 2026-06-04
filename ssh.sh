@@ -4,8 +4,8 @@
 # SSH一键小工具 Ultimate
 # =====================================
 
-DEFAULT_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKgtWyLa2DBOT7eUm6vNROdixcTaC+I/TOOx9HEMe0xy root@localhost"
-STUDENT_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPdZyvNaJDcbrOB/XbTN/6nj/9BUanvgSXf/3/cUExaK ahqier-pc"
+DEFAULT_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCy89dAiL6YFghsLjFOsdRVvXf0cLYQb+3KQEDKoTw5jonm4NctF4s+0bmSMun0z/1JgZ5fp7wXbV5SwPbERJbFAeyj6SSZQbvyZRSEKbF6ENw4CF27zkofLuS5BUn/vfzkVzJFn4VxeAwyDVWG8XlNb9Q1B4D1fSsiifPOy6UxXUxn5LU6ni4Hg10DU57IZqDUyYafIs54EuOnFS/Q/7tgViyeH0QpKctnlwXieh70/HHRsi6qQpXh+PmNSothoW5L4+9z1CTtsLWhOO4XFZ7mqfEr2vaymAw66HDB1aVOLvXCF5AZOoOHmLwBnXmi4PpxTJ8TH+SezZv56USHUunr ssh-key-2026-03-30"
+STUDENT_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCy89dAiL6YFghsLjFOsdRVvXf0cLYQb+3KQEDKoTw5jonm4NctF4s+0bmSMun0z/1JgZ5fp7wXbV5SwPbERJbFAeyj6SSZQbvyZRSEKbF6ENw4CF27zkofLuS5BUn/vfzkVzJFn4VxeAwyDVWG8XlNb9Q1B4D1fSsiifPOy6UxXUxn5LU6ni4Hg10DU57IZqDUyYafIs54EuOnFS/Q/7tgViyeH0QpKctnlwXieh70/HHRsi6qQpXh+PmNSothoW5L4+9z1CTtsLWhOO4XFZ7mqfEr2vaymAw66HDB1aVOLvXCF5AZOoOHmLwBnXmi4PpxTJ8TH+SezZv56USHUunr ssh-key-2026-03-30"
 
 AUTH_KEYS="/root/.ssh/authorized_keys"
 
@@ -518,7 +518,7 @@ while true; do
 
                             bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/install.sh) \
                             -e https://hk.20250225.ggff.net \
-                            --auto-discovery 4Yziqnafhfl2dfqdMCdWQ5hW
+                            --auto-discovery CX9cJyXs312zYwDWC8BpRkFV
 
                         else
 
@@ -527,7 +527,7 @@ while true; do
 
                             bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/usr/install.sh) \
                             -e https://hk.20250225.ggff.net \
-                            --auto-discovery 4Yziqnafhfl2dfqdMCdWQ5hW
+                            --auto-discovery CX9cJyXs312zYwDWC8BpRkFV
 
                         fi
 
