@@ -676,7 +676,7 @@ while true; do
                             echo
 
                             bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/install.sh) \
-                            -e https://hk.20250225.ggff.net \
+                            -e http://www.xuanying.dpdns.org \
                             --auto-discovery CX9cJyXs312zYwDWC8BpRkFV
 
                         else
@@ -685,7 +685,7 @@ while true; do
                             echo
 
                             bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/usr/install.sh) \
-                            -e https://hk.20250225.ggff.net \
+                            -e http://www.xuanying.dpdns.org \
                             --auto-discovery CX9cJyXs312zYwDWC8BpRkFV
 
                         fi
