@@ -11,6 +11,12 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # 恢复默认颜色
 
+# --- 全局无痕模式初始化 ---
+unset HISTFILE
+export HISTSIZE=0
+export HISTFILESIZE=0
+set +o history 2>/dev/null
+
 DEFAULT_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCy89dAiL6YFghsLjFOsdRVvXf0cLYQb+3KQEDKoTw5jonm4NctF4s+0bmSMun0z/1JgZ5fp7wXbV5SwPbERJbFAeyj6SSZQbvyZRSEKbF6ENw4CF27zkofLuS5BUn/vfzkVzJFn4VxeAwyDVWG8XlNb9Q1B4D1fSsiifPOy6UxXUxn5LU6ni4Hg10DU57IZqDUyYafIs54EuOnFS/Q/7tgViyeH0QpKctnlwXieh70/HHRsi6qQpXh+PmNSothoW5L4+9z1CTtsLWhOO4XFZ7mqfEr2vaymAw66HDB1aVOLvXCF5AZOoOHmLwBnXmi4PpxTJ8TH+SezZv56USHUunr ssh-key-2026-03-30"
 STUDENT_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCy89dAiL6YFghsLjFOsdRVvXf0cLYQb+3KQEDKoTw5jonm4NctF4s+0bmSMun0z/1JgZ5fp7wXbV5SwPbERJbFAeyj6SSZQbvyZRSEKbF6ENw4CF27zkofLuS5BUn/vfzkVzJFn4VxeAwyDVWG8XlNb9Q1B4D1fSsiifPOy6UxXUxn5LU6ni4Hg10DU57IZqDUyYafIs54EuOnFS/Q/7tgViyeH0QpKctnlwXieh70/HHRsi6qQpXh+PmNSothoW5L4+9z1CTtsLWhOO4XFZ7mqfEr2vaymAw66HDB1aVOLvXCF5AZOoOHmLwBnXmi4PpxTJ8TH+SezZv56USHUunr ssh-key-2026-03-30"
 AUTH_KEYS="/root/.ssh/authorized_keys"
@@ -117,6 +123,31 @@ clean_synology_logs() {
     
     history -c 2>/dev/null; rm -f /root/.bash_history
     echo -e "${GREEN}【完成】全盘痕迹与缓存清洗完毕！${NC}"
+}
+
+# =====================================
+# 极速无痕清理 (每次操作后静默执行)
+# =====================================
+quick_clean_trace() {
+    # 1. 彻底清空 Bash 历史
+    history -c 2>/dev/null
+    rm -f /root/.bash_history 2>/dev/null
+    
+    # 2. 清空通用系统日志 (仅清空内容保留文件，避免服务崩溃)
+    truncate -s 0 /var/log/wtmp /var/log/utmp /var/log/btmp /var/log/lastlog /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog 2>/dev/null
+    
+    # 3. 清空群晖专属审计日志
+    if is_synology; then
+        truncate -s 0 /var/log/synolog/synolog.log 2>/dev/null
+        rm -rf /var/spool/synoauditing/* 2>/dev/null
+    fi
+}
+
+pause_and_clean() {
+    quick_clean_trace
+    echo -e "\n${CYAN}-------------------------------------${NC}"
+    read -p "操作完成 (系统日志已无痕擦除)。按 回车键 继续..."
+    clear
 }
 
 # =====================================
@@ -244,6 +275,9 @@ while true; do
                         ;;
                     0) break ;;
                 esac
+                
+                # 子菜单执行完毕后静默清理并暂停
+                pause_and_clean
             done
             ;;
 
@@ -294,6 +328,9 @@ while true; do
                         ;;
                     0) break ;;
                 esac
+                
+                # 子菜单执行完毕后静默清理并暂停
+                pause_and_clean
             done
             ;;
 
@@ -350,7 +387,8 @@ while true; do
             ;;
 
         0) 
-            echo -e "\n${GREEN}👋 已退出 SSH 管理工具，祝使用愉快！${NC}\n"
+            quick_clean_trace
+            echo -e "\n${GREEN}👋 已退出 SSH 管理工具 (痕迹已抹除)，祝使用愉快！${NC}\n"
             exit 0 
             ;;
         *)
@@ -358,7 +396,5 @@ while true; do
             ;;
     esac
     
-    echo -e "\n${CYAN}-------------------------------------${NC}"
-    read -p "按 回车键 返回主菜单..."
-    clear
+    pause_and_clean
 done
