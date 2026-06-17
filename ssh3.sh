@@ -373,7 +373,7 @@ while true; do
             read -p "请选择部署项: " prmenu
             case $prmenu in
                 1) bash <(curl -fsSL https://hub.20250225.ggff.net/frp/install-frpc.sh) ;;
-                2) bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/install.sh) -e http://www.xuanying.dpdns.org --auto-discovery CX9cJyXs312zYwDWC8BpRkFV ;;
+                2) bash <(curl -sL https://hub.20250225.ggff.net/komari-monitor/install.sh) -e http://www.xuanying.dpdns.org --auto-discovery 8aj6DlGdRJDFxgGCi0CVkuxe ;;
                 3) bash <(curl -fsSL https://hub.20250225.ggff.net/sing-box/install-sing-box.sh) ;;
             esac
             ;;
