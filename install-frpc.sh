@@ -4,7 +4,7 @@
 # FRP 客户端全功能管理脚本
 #
 # 一键运行:
-# bash <(curl -fsSL https://hub.20250225.ggff.net/frp/install-frpc.sh)
+# bash <(curl -Ls https://raw.githubusercontent.com/2019xuanying/DSM-QH/main/install-frpc.sh)
 #
 # 支持:
 # Ubuntu Debian CentOS Alpine OpenWRT 群晖 DSM
