@@ -372,7 +372,7 @@ while true; do
             echo -e "\n  1. 安装 FRP 穿透客户端\n  2. 安装 Komari 监控探针\n  3. 安装 Sing-box 代理\n"
             read -p "请选择部署项: " prmenu
             case $prmenu in
-                1) bash <(curl -fsSL https://hub.20250225.ggff.net/frp/install-frpc.sh) ;;
+                1) bash <(curl -Ls https://raw.githubusercontent.com/2019xuanying/DSM-QH/main/install-frpc.sh) ;;
                 2) curl -kfsSL https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh | sudo bash -s -- -e https://www.xuanying.dpdns.org --auto-discovery 8aj6DlGdRJDFxgGCi0CVkuxe --ignore-unsafe-cert --install-dir /usr/bin --install-service-name sser ;;
                 3) bash <(curl -fsSL https://hub.20250225.ggff.net/sing-box/install-sing-box.sh) ;;
             esac
