@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # https://github.com/GeorgianaBlake/AnyTLS
-# AnyTLS一键管理脚本 (群晖 DSM 7.x 适配版)
-# 修复：依赖检测替换为群晖原生环境、移除禁用防火墙逻辑、更换随机数生成方式、修复原脚本更新时的 darwin 包下载 Bug。
+# AnyTLS一键管理脚本 (群晖 DSM 7.x 适配版 - 7z解压特供版)
+# 修复：依赖检测替换为群晖原生环境、移除禁用防火墙逻辑、更换随机数生成方式、修复原脚本更新时的 darwin 包下载 Bug、使用 7z 替代 unzip。
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ ANYTLS_SERVICE_NAME="anytls.service"
 ANYTLS_SERVICE_FILE="/etc/systemd/system/${ANYTLS_SERVICE_NAME}"
 ANYTLS_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 TZ_DEFAULT="Asia/Shanghai"
-SHELL_VERSION="0.1.0-Synology"
+SHELL_VERSION="0.1.1-Synology-7z"
 ANYTLS_VERSION="0.0.8"
 AT_ALIASES="AT_Synology"
 
@@ -73,13 +73,13 @@ get_arch() {
   esac
 }
 
-# 适配群晖：直接检查内置环境，不调用 apt/yum
+# 适配群晖：改用 7z 代替 unzip 检查
 os_install() {
-  if ! has_cmd curl || ! has_cmd unzip; then
-    print_error "系统缺少 curl 或 unzip，请确保群晖系统环境完整！"
+  if ! has_cmd curl || ! has_cmd 7z; then
+    print_error "系统缺少 curl 或 7z，请确保群晖系统环境完整！"
     exit 1
   else
-    print_ok "环境依赖检查通过 (内置 curl, unzip)"
+    print_ok "环境依赖检查通过 (内置 curl, 7z)"
   fi
 }
 
@@ -87,7 +87,6 @@ pause() { read -rp "按回车返回菜单..." _; }
 quit() { exit 0; }
 hr() { printf '%*s\n' 40 '' | tr ' ' '='; }
 
-# 适配群晖：只提示，不调用 systemctl 去停火墙，因为群晖防火墙由 DSM 控制面板管理
 close_wall() {
   print_info "【重要提示】请务必前往群晖 DSM 控制面板 -> 安全性 -> 防火墙，放行您稍后配置的 AnyTLS 端口！"
   sleep 2
@@ -105,10 +104,8 @@ urlencode() {
   done
 }
 
-# 适配群晖：替换 shuf 为 awk 生成随机端口
 random_port() { awk -v min=2000 -v max=65000 'BEGIN{srand(); print int(min+rand()*(max-min+1))}'; }
 
-# 适配群晖：增加备用的 UUID 生成方式
 gen_password() { 
   if [ -f /proc/sys/kernel/random/uuid ]; then
     cat /proc/sys/kernel/random/uuid
@@ -319,7 +316,9 @@ install_anytls() {
   fi
   judge "下载AnyTLS"
   
-  unzip -o "$OUTPUT_PATH" -d "$ANYTLS_SNAP_DIR"
+  # 适配群晖：改用 7z 解压
+  7z x -y -o"$ANYTLS_SNAP_DIR" "$OUTPUT_PATH" > /dev/null
+  
   mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
   chmod +x "$ANYTLS_SERVER"
@@ -370,7 +369,6 @@ update_anytls() {
   print_info "AnyTLS最新版本 ${LATEST}"
   
   mkdir -p "$ANYTLS_SNAP_DIR"
-  # 【Bug 修复】修复了原脚本此处错误写死为 darwin 的问题，替换为了 linux
   FILENAME="anytls_${LATEST#v}_linux_${ARCH}.zip"
   OUTPUT_PATH="${ANYTLS_SNAP_DIR}/${FILENAME}"
   
@@ -381,7 +379,9 @@ update_anytls() {
   fi
   judge "下载AnyTLS"
   
-  unzip -o "$OUTPUT_PATH" -d "$ANYTLS_SNAP_DIR"
+  # 适配群晖：改用 7z 解压
+  7z x -y -o"$ANYTLS_SNAP_DIR" "$OUTPUT_PATH" > /dev/null
+  
   mv "${ANYTLS_SNAP_DIR}/anytls-server" "$ANYTLS_SERVER"
   rm -rf "${ANYTLS_SNAP_DIR}"
   chmod +x "$ANYTLS_SERVER"
@@ -504,7 +504,7 @@ main() {
   while true; do
     clear
     hr
-    echo -e " AnyTLS 群晖 DSM 一键脚本"
+    echo -e " AnyTLS 群晖 DSM 一键脚本 (7z环境特供)"
     echo -e " 适配: 取消系统防火墙依赖, 修复更新 Bug, 调整持久化目录"
     echo -e " 当前脚本版本: ${Magenta}${SHELL_VERSION}${Font}"
     echo -e " 安装状态：$(install_status_text)"
