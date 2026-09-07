@@ -6,7 +6,8 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-CONFIG_DIR="/etc/sing-box"
+# 适配群晖：改用 /usr/local/etc 避免系统更新被清空
+CONFIG_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CERT_DIR="$CONFIG_DIR/cert"
 SECRETS_FILE="$CONFIG_DIR/.secrets"
@@ -16,25 +17,33 @@ TMP_JSON=$(mktemp)
 trap 'rm -f $TMP_JSON' EXIT
 trap 'rm -f $TMP_JSON; exit 1' INT TERM
 
-if [ -f /etc/alpine-release ]; then
+# 适配群晖：系统类型检测
+if [ -f /etc/synoinfo.conf ] || grep -q -i "synology" /proc/version 2>/dev/null; then
+    OS_TYPE="synology"
+elif [ -f /etc/alpine-release ]; then
     OS_TYPE="alpine"
 elif command -v apt-get >/dev/null 2>&1; then
     OS_TYPE="debian"
 elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
     OS_TYPE="centos"
 else
-    OS_TYPE="debian"
+    OS_TYPE="synology" # 回退到无依赖模式
 fi
 
+# 适配群晖：全架构支持映射
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64) SB_ARCH="amd64" ;;
+    x86_64|amd64) SB_ARCH="amd64" ;;
+    i386|i686) SB_ARCH="386" ;;
     aarch64|arm64) SB_ARCH="arm64" ;;
+    armv7*) SB_ARCH="armv7" ;;
+    armv6*) SB_ARCH="armv6" ;;
+    armv5*) SB_ARCH="armv5" ;;
     *) echo -e "${RED}错误: 不支持的系统架构 ${ARCH}！${PLAIN}"; exit 1 ;;
 esac
 
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 必须以 root 身份运行本脚本！${PLAIN}"
+    echo -e "${RED}错误: 必须以 root 身份运行本脚本！(群晖请先运行 sudo -i)${PLAIN}"
     exit 1
 fi
 
@@ -112,7 +121,11 @@ check_port() {
 rand_port() {
     local port
     while true; do
-        port=$(shuf -i 10000-65000 -n 1)
+        if command -v shuf >/dev/null 2>&1; then
+            port=$(shuf -i 10000-65000 -n 1)
+        else
+            port=$(awk -v min=10000 -v max=65000 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
+        fi
         if ! check_port "$port"; then
             echo "$port"
             break
@@ -170,6 +183,10 @@ apply_jq_config() {
 open_fw_port() {
     local port=$1
     local proto=$2
+    if [ "$OS_TYPE" == "synology" ]; then
+        echo -e "${YELLOW}群晖请前往 DSM控制台 -> 安全性 -> 防火墙 手动放行 ${port}/${proto} 端口！${PLAIN}" >&2
+        return
+    fi
     local success=0
     local fw_found=0
 
@@ -213,7 +230,8 @@ open_fw_port() {
 close_fw_port() {
     local port=$1
     local proto=$2
-
+    if [ "$OS_TYPE" == "synology" ]; then return; fi
+    
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -qw "active"; then
         ufw delete allow ${port}/${proto} >/dev/null 2>&1
     elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
@@ -270,7 +288,22 @@ migrate_certs() {
 init_base() {
     if ! command -v jq &> /dev/null || [ ! -f "/usr/local/bin/sing-box" ]; then
         echo -e "${CYAN}==> 正在准备环境与内核...${PLAIN}"
-        if [ "$OS_TYPE" == "alpine" ]; then
+        
+        # 适配群晖：跳过包管理器，缺 jq 则下载静态版
+        if [ "$OS_TYPE" == "synology" ]; then
+            echo -e "${YELLOW}检测到群晖/精简环境，跳过系统依赖包安装...${PLAIN}"
+            if ! command -v jq &> /dev/null; then
+                echo -e "${CYAN}==> 正在下载 jq 静态组件...${PLAIN}"
+                local jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+                [[ "$SB_ARCH" == "arm64" ]] && jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-arm64"
+                [[ "$SB_ARCH" == "386" ]] && jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-i386"
+                curl -sL "$jq_url" -o /usr/local/bin/jq && chmod +x /usr/local/bin/jq
+                if ! command -v jq &> /dev/null; then
+                    echo -e "${RED}jq 下载失败，请在套件中心安装 SynoCli File Tools 或手动配置 jq 环境！${PLAIN}"
+                    exit 1
+                fi
+            fi
+        elif [ "$OS_TYPE" == "alpine" ]; then
             apk update >/dev/null 2>&1
             apk add curl wget jq tar openssl socat bash nano libc6-compat gcompat >/dev/null 2>&1
             rc-update add crond default >/dev/null 2>&1
@@ -303,16 +336,16 @@ init_base() {
             fi
         fi
 
-        echo -e "${CYAN}==> 开始下载 v${VERSION} 内核...${PLAIN}"
+        echo -e "${CYAN}==> 开始下载 v${VERSION} 内核 [${SB_ARCH}]...${PLAIN}"
         
         local INIT_TMP=$(mktemp -d)
-        if wget --show-progress -qO $INIT_TMP/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${SB_ARCH}.tar.gz"; then
+        if wget --show-progress -qO $INIT_TMP/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${SB_ARCH}.tar.gz" || curl -sL -o $INIT_TMP/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${SB_ARCH}.tar.gz"; then
             if tar -xzf $INIT_TMP/sing-box.tar.gz -C $INIT_TMP; then
                 mv -f $INIT_TMP/sing-box-${VERSION}-linux-${SB_ARCH}/sing-box /usr/local/bin/sing-box
                 chmod +x /usr/local/bin/sing-box
                 echo -e "${GREEN}==> 内核下载并解压完毕！${PLAIN}"
             else
-                echo -e "${RED}解压失败！${PLAIN}"
+                echo -e "${RED}解压失败！可能不支持该架构或包已损坏。${PLAIN}"
                 exit 1
             fi
         else
@@ -355,18 +388,30 @@ init_base() {
 restart_service() {
     local INBOUND_COUNT=$(jq '.inbounds | length' $CONFIG_FILE 2>/dev/null)
     if [ -z "$INBOUND_COUNT" ] || [ "$INBOUND_COUNT" -eq 0 ]; then
-        if [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop >/dev/null 2>&1; else systemctl stop sing-box >/dev/null 2>&1; fi
+        if [ "$OS_TYPE" == "synology" ]; then
+            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+        elif [ "$OS_TYPE" == "alpine" ]; then 
+            rc-service sing-box stop >/dev/null 2>&1 
+        else 
+            systemctl stop sing-box >/dev/null 2>&1 
+        fi
         return 0
     fi
 
     if ! /usr/local/bin/sing-box check -c $CONFIG_FILE; then return 1; fi
     
-    if [ "$OS_TYPE" == "alpine" ]; then
+    # 适配群晖：剥离 systemd 使用 nohup 运行
+    if [ "$OS_TYPE" == "synology" ]; then
+        pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+        nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &
+        sleep 1
+        if ! pgrep -f /usr/local/bin/sing-box >/dev/null 2>&1; then return 1; fi
+    elif [ "$OS_TYPE" == "alpine" ]; then
         cat > /etc/init.d/sing-box << 'EOF'
 #!/sbin/openrc-run
 name="sing-box"
 command="/usr/local/bin/sing-box"
-command_args="run -c /etc/sing-box/config.json"
+command_args="run -c /usr/local/etc/sing-box/config.json"
 command_background=true
 pidfile="/var/run/sing-box.pid"
 rc_ulimit="-n 65535"
@@ -383,7 +428,7 @@ EOF
 Description=sing-box service
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c /usr/local/etc/sing-box/config.json
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=infinity
@@ -467,7 +512,9 @@ apply_real_cert() {
         fi
     fi
     
-    if [ "$OS_TYPE" == "alpine" ]; then
+    if [ "$OS_TYPE" == "synology" ]; then
+        RELOAD_CMD="pkill -f sing-box; nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &"
+    elif [ "$OS_TYPE" == "alpine" ]; then
         RELOAD_CMD="rc-service sing-box restart"
     else
         RELOAD_CMD="systemctl restart sing-box"
@@ -489,8 +536,8 @@ apply_real_cert() {
 
 generate_self_cert() {
     if ! command -v openssl >/dev/null 2>&1; then
-        echo -e "${RED}系统缺少 openssl，正在尝试安装...${PLAIN}"
-        if [ "$OS_TYPE" == "alpine" ]; then apk add openssl; elif [ "$OS_TYPE" == "centos" ]; then yum install -y openssl || dnf install -y openssl; else apt-get install -y openssl; fi
+        echo -e "${RED}系统缺少 openssl，群晖如未自带请安装相关套件。正在尝试自动修复...${PLAIN}"
+        if [ "$OS_TYPE" == "alpine" ]; then apk add openssl; elif [ "$OS_TYPE" == "centos" ]; then yum install -y openssl || dnf install -y openssl; elif [ "$OS_TYPE" == "debian" ]; then apt-get install -y openssl; fi
         if ! command -v openssl >/dev/null 2>&1; then
             echo -e "${RED}openssl 自动安装失败，请手动安装后重试！${PLAIN}"
             return 1
@@ -956,7 +1003,7 @@ add_config() {
                         echo -e "${CYAN}正在下载 cloudflared 组件...${PLAIN}"
                         local TMP_CF=$(mktemp)
                         local cf_arch="amd64"
-                        [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && cf_arch="arm64"
+                        [[ "$SB_ARCH" == "arm64" ]] && cf_arch="arm64"
                         if wget --show-progress -qO $TMP_CF "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" || curl -sL -o $TMP_CF "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; then
                             mv $TMP_CF /usr/local/bin/cloudflared
                             chmod +x /usr/local/bin/cloudflared
@@ -966,7 +1013,11 @@ add_config() {
                         fi
                     fi
                     
-                    if [ "$OS_TYPE" == "alpine" ]; then
+                    # 适配群晖：剥离 Systemd 改用 nohup
+                    if [ "$OS_TYPE" == "synology" ]; then
+                        pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+                        nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token "${ARGO_TOKEN}" > /tmp/cloudflared-${TAG}.log 2>&1 &
+                    elif [ "$OS_TYPE" == "alpine" ]; then
                         cat > "/etc/init.d/cloudflared-${TAG}" << 'EOF'
 #!/sbin/openrc-run
 name="cloudflared-@@SB_TAG@@"
@@ -1018,7 +1069,9 @@ EOF
             remove_secret "ARGO_IP_${PORT}"
             remove_secret "ARGO_DOMAIN_${PORT}"
             if [ "$IS_ARGO" -eq 1 ]; then
-                if [ "$OS_TYPE" == "alpine" ]; then
+                if [ "$OS_TYPE" == "synology" ]; then
+                    pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+                elif [ "$OS_TYPE" == "alpine" ]; then
                     rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                     rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
                     rm -f "/etc/init.d/cloudflared-${TAG}"
@@ -1270,7 +1323,11 @@ modify_config() {
                     mv ${CONFIG_FILE}.bak $CONFIG_FILE
                 else
                     if [ "$IS_ARGO" -eq 1 ]; then
-                        if [ "$OS_TYPE" == "alpine" ]; then
+                        if [ "$OS_TYPE" == "synology" ]; then
+                            pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+                            # 对于群晖，重启 cloudflared 需要重新解析 token，较为复杂，建议此处手动重启脚本或重启系统。
+                            echo -e "${YELLOW}请注意，Argo 节点名称已更改，您可能需要重启服务使进程生效。${PLAIN}"
+                        elif [ "$OS_TYPE" == "alpine" ]; then
                             rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                             rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
                             mv "/etc/init.d/cloudflared-${TAG}" "/etc/init.d/cloudflared-${NEW_TAG}"
@@ -1357,7 +1414,9 @@ del_config() {
         fi
         
         if [ "$IS_ARGO" -eq 1 ]; then
-            if [ "$OS_TYPE" == "alpine" ]; then
+            if [ "$OS_TYPE" == "synology" ]; then
+                pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+            elif [ "$OS_TYPE" == "alpine" ]; then
                 rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                 rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
                 rm -f "/etc/init.d/cloudflared-${TAG}"
@@ -1442,14 +1501,17 @@ run_manage() {
                    local INBOUND_COUNT=$(jq '.inbounds | length' $CONFIG_FILE 2>/dev/null)
                    if [ -z "$INBOUND_COUNT" ] || [ "$INBOUND_COUNT" -eq 0 ]; then echo -e "${RED}未添加节点配置！${PLAIN}"; pause; break; fi
                    if [ "$run_idx" == "1" ]; then
-                       if [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box start; else systemctl start sing-box; fi
+                       if [ "$OS_TYPE" == "synology" ]; then
+                           pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+                           nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &
+                       elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box start; else systemctl start sing-box; fi
                        echo -e "${GREEN}已启动${PLAIN}"
                    else
                        restart_service; echo -e "${GREEN}已重启${PLAIN}"
                    fi
                    pause; break ;;
                 2) 
-                   if [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop; else systemctl stop sing-box; fi
+                   if [ "$OS_TYPE" == "synology" ]; then pkill -f /usr/local/bin/sing-box; elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop; else systemctl stop sing-box; fi
                    echo -e "${GREEN}已停止${PLAIN}"; pause; break ;;
                 0) return ;;
                 *) echo -e "${RED}输入错误!${PLAIN}" ;;
@@ -1489,9 +1551,11 @@ update_manage() {
                     
                     echo -e "\n${YELLOW}即将更新内核至 v${NEW_VER}...${PLAIN}"
                     local UP_TMP=$(mktemp -d)
-                    if wget --show-progress -qO $UP_TMP/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${NEW_VER}/sing-box-${NEW_VER}-linux-${SB_ARCH}.tar.gz"; then
+                    if wget --show-progress -qO $UP_TMP/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${NEW_VER}/sing-box-${NEW_VER}-linux-${SB_ARCH}.tar.gz" || curl -sL -o $UP_TMP/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${NEW_VER}/sing-box-${NEW_VER}-linux-${SB_ARCH}.tar.gz"; then
                         if tar -xzf $UP_TMP/sb.tar.gz -C $UP_TMP; then
-                            if [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop >/dev/null 2>&1; else systemctl stop sing-box >/dev/null 2>&1; fi
+                            if [ "$OS_TYPE" == "synology" ]; then
+                                pkill -f /usr/local/bin/sing-box >/dev/null 2>&1
+                            elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop >/dev/null 2>&1; else systemctl stop sing-box >/dev/null 2>&1; fi
                             rm -f /usr/local/bin/sing-box
                             mv $UP_TMP/sing-box-${NEW_VER}-linux-${SB_ARCH}/sing-box /usr/local/bin/sing-box
                             chmod +x /usr/local/bin/sing-box
@@ -1527,6 +1591,11 @@ update_manage() {
 }
 
 enable_bbr() {
+    if [ "$OS_TYPE" == "synology" ]; then
+        echo -e "${YELLOW}警告: 群晖 DSM 内核大多锁定了拥塞控制算法，强制修改可能报错。如需 BBR，通常需要重新编译 DSM 内核。${PLAIN}"
+        pause
+        return
+    fi
     echo -e "${CYAN}==> 尝试开启 BBR 加速...${PLAIN}"
     local current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     if [ "$current_cc" == "bbr" ]; then
@@ -1669,7 +1738,10 @@ uninstall_all() {
     read -p "确认卸载脚本、sing-box和所有节点配置吗？(y/n): " un
     if [[ "$un" == "y" ]]; then
         remove_all_fw_rules
-        if [ "$OS_TYPE" == "alpine" ]; then
+        if [ "$OS_TYPE" == "synology" ]; then
+            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1
+            pkill -f cloudflared >/dev/null 2>&1
+        elif [ "$OS_TYPE" == "alpine" ]; then
             rc-service sing-box stop >/dev/null 2>&1
             rc-update del sing-box default >/dev/null 2>&1
             rm -f /etc/init.d/sing-box
@@ -1693,7 +1765,7 @@ uninstall_all() {
             fi
         fi
         
-        rm -rf /usr/local/bin/sing-box /usr/local/bin/cloudflared /usr/local/bin/sb /etc/sing-box
+        rm -rf /usr/local/bin/sing-box /usr/local/bin/cloudflared /usr/local/bin/sb /usr/local/etc/sing-box /etc/sing-box
         
         if [ -f /etc/sysctl.d/99-bbr.conf ]; then
             rm -f /etc/sysctl.d/99-bbr.conf 2>/dev/null
@@ -1712,7 +1784,9 @@ menu() {
     
     while true; do
         clear
-        if [ "$OS_TYPE" == "alpine" ]; then
+        if [ "$OS_TYPE" == "synology" ]; then
+            if pgrep -f /usr/local/bin/sing-box >/dev/null; then SB_STATUS="active"; else SB_STATUS="stopped"; fi
+        elif [ "$OS_TYPE" == "alpine" ]; then
             SB_STATUS=$(rc-service sing-box status 2>/dev/null | grep -o 'started')
             [ "$SB_STATUS" == "started" ] && SB_STATUS="active" || SB_STATUS="stopped"
         else
@@ -1729,7 +1803,8 @@ menu() {
             VER_SHOW="未安装"
         fi
         
-        echo -e "------------- sing-box 管理脚本 -------------"
+        echo -e "------------- sing-box 管理脚本 (群晖特供) -------------"
+        echo -e "架构环境: ${YELLOW}${SB_ARCH}${PLAIN}"
         echo -e "sing-box ${VER_SHOW}: ${ST_COLOR}${SB_STATUS}${PLAIN}\n"
         echo -e " 1) 添加节点"
         echo -e " 2) 更改节点"
@@ -1789,18 +1864,10 @@ if [[ "$0" != "/usr/local/bin/sb" ]] && [[ "$0" != "sb" ]] && [[ "$0" != *"/sb" 
         esac
     else
         echo -e "${CYAN}==> 正在将管理脚本写入到全局环境...${PLAIN}"
-        SCRIPT_TMP=$(mktemp)
-        if curl -sL "https://raw.githubusercontent.com/edxgj/sing-box-sh/main/install.sh" -o "$SCRIPT_TMP" && [ -s "$SCRIPT_TMP" ]; then
-            mv "$SCRIPT_TMP" /usr/local/bin/sb
-            chmod +x /usr/local/bin/sb
-            rm -f sb.sh install.sh 2>/dev/null
-            echo -e "\n${GREEN}==> 脚本安装完成！以后可随时输入 ${YELLOW}sb${GREEN} 快捷调用本面板。${PLAIN}"
-            sleep 2
-        else
-            echo -e "${RED}初始化脚本下载失败，请检查网络！${PLAIN}"
-            rm -f "$SCRIPT_TMP"
-            exit 1
-        fi
+        cp "$0" /usr/local/bin/sb
+        chmod +x /usr/local/bin/sb
+        echo -e "\n${GREEN}==> 脚本安装完成！以后可随时输入 ${YELLOW}sb${GREEN} 快捷调用本面板。${PLAIN}"
+        sleep 2
     fi
 fi
 
