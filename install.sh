@@ -6,7 +6,6 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# 适配群晖：改用 /usr/local/etc 避免系统更新被清空
 CONFIG_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CERT_DIR="$CONFIG_DIR/cert"
@@ -17,7 +16,7 @@ TMP_JSON=$(mktemp)
 trap 'rm -f $TMP_JSON' EXIT
 trap 'rm -f $TMP_JSON; exit 1' INT TERM
 
-# 适配群晖：系统类型检测
+# 系统探测
 if [ -f /etc/synoinfo.conf ] || grep -q -i "synology" /proc/version 2>/dev/null; then
     OS_TYPE="synology"
 elif [ -f /etc/alpine-release ]; then
@@ -27,10 +26,10 @@ elif command -v apt-get >/dev/null 2>&1; then
 elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
     OS_TYPE="centos"
 else
-    OS_TYPE="synology" # 回退到无依赖模式
+    OS_TYPE="unknown"
 fi
 
-# 适配群晖：全架构支持映射
+# 核心架构识别
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64|amd64) SB_ARCH="amd64" ;;
@@ -49,6 +48,11 @@ fi
 
 GLOBAL_IP=""
 GLOBAL_LATEST_VER=""
+
+# ==== 新增：智能守护进程探测 ====
+has_systemd() {
+    command -v systemctl >/dev/null 2>&1 && systemctl list-units >/dev/null 2>&1
+}
 
 pause() {
     while read -r -t 0.1; do :; done
@@ -289,9 +293,8 @@ init_base() {
     if ! command -v jq &> /dev/null || [ ! -f "/usr/local/bin/sing-box" ]; then
         echo -e "${CYAN}==> 正在准备环境与内核...${PLAIN}"
         
-        # 适配群晖：跳过包管理器，缺 jq 则下载静态版
-        if [ "$OS_TYPE" == "synology" ]; then
-            echo -e "${YELLOW}检测到群晖/精简环境，跳过系统依赖包安装...${PLAIN}"
+        # 兼容无包管理器环境（自动下载 jq 静态文件）
+        if [ "$OS_TYPE" == "synology" ] || [ "$OS_TYPE" == "unknown" ]; then
             if ! command -v jq &> /dev/null; then
                 echo -e "${CYAN}==> 正在下载 jq 静态组件...${PLAIN}"
                 local jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
@@ -299,7 +302,7 @@ init_base() {
                 [[ "$SB_ARCH" == "386" ]] && jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-i386"
                 curl -sL "$jq_url" -o /usr/local/bin/jq && chmod +x /usr/local/bin/jq
                 if ! command -v jq &> /dev/null; then
-                    echo -e "${RED}jq 下载失败，请在套件中心安装 SynoCli File Tools 或手动配置 jq 环境！${PLAIN}"
+                    echo -e "${RED}jq 下载失败，请手动安装！${PLAIN}"
                     exit 1
                 fi
             fi
@@ -318,7 +321,7 @@ init_base() {
                 yum update -y >/dev/null 2>&1
                 yum install -y curl wget jq tar openssl socat cronie systemd nano >/dev/null 2>&1
             fi
-            systemctl enable crond --now >/dev/null 2>&1
+            has_systemd && systemctl enable crond --now >/dev/null 2>&1
         else
             apt-get update -y >/dev/null 2>&1
             apt-get install -y curl wget jq tar openssl socat cron systemd nano >/dev/null 2>&1
@@ -385,44 +388,23 @@ init_base() {
     migrate_certs
 }
 
+# ==== 统一管理：sing-box 状态守护 ====
 restart_service() {
     local INBOUND_COUNT=$(jq '.inbounds | length' $CONFIG_FILE 2>/dev/null)
     if [ -z "$INBOUND_COUNT" ] || [ "$INBOUND_COUNT" -eq 0 ]; then
-        if [ "$OS_TYPE" == "synology" ]; then
-            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+        if has_systemd; then
+            systemctl stop sing-box >/dev/null 2>&1 || true
         elif [ "$OS_TYPE" == "alpine" ]; then 
-            rc-service sing-box stop >/dev/null 2>&1 
-        else 
-            systemctl stop sing-box >/dev/null 2>&1 
+            rc-service sing-box stop >/dev/null 2>&1 || true
+        else
+            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
         fi
         return 0
     fi
 
     if ! /usr/local/bin/sing-box check -c $CONFIG_FILE; then return 1; fi
     
-    # 适配群晖：剥离 systemd 使用 nohup 运行
-    if [ "$OS_TYPE" == "synology" ]; then
-        pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
-        nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &
-        sleep 1
-        if ! pgrep -f /usr/local/bin/sing-box >/dev/null 2>&1; then return 1; fi
-    elif [ "$OS_TYPE" == "alpine" ]; then
-        cat > /etc/init.d/sing-box << 'EOF'
-#!/sbin/openrc-run
-name="sing-box"
-command="/usr/local/bin/sing-box"
-command_args="run -c /usr/local/etc/sing-box/config.json"
-command_background=true
-pidfile="/var/run/sing-box.pid"
-rc_ulimit="-n 65535"
-depend() { need net; }
-EOF
-        chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1
-        rc-service sing-box restart >/dev/null 2>&1
-        sleep 1
-        if ! rc-service sing-box status 2>/dev/null | grep -q 'started'; then return 1; fi
-    else
+    if has_systemd; then
         cat > /etc/systemd/system/sing-box.service << 'EOF'
 [Unit]
 Description=sing-box service
@@ -440,6 +422,28 @@ EOF
         systemctl restart sing-box >/dev/null 2>&1
         sleep 1
         if [ "$(systemctl is-active sing-box 2>/dev/null)" != "active" ]; then return 1; fi
+    elif [ "$OS_TYPE" == "alpine" ]; then
+        cat > /etc/init.d/sing-box << 'EOF'
+#!/sbin/openrc-run
+name="sing-box"
+command="/usr/local/bin/sing-box"
+command_args="run -c /usr/local/etc/sing-box/config.json"
+command_background=true
+pidfile="/var/run/sing-box.pid"
+rc_ulimit="-n 65535"
+depend() { need net; }
+EOF
+        chmod +x /etc/init.d/sing-box
+        rc-update add sing-box default >/dev/null 2>&1
+        rc-service sing-box restart >/dev/null 2>&1
+        sleep 1
+        if ! rc-service sing-box status 2>/dev/null | grep -q 'started'; then return 1; fi
+    else
+        # Fallback to nohup
+        pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+        nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &
+        sleep 1
+        if ! pgrep -f /usr/local/bin/sing-box >/dev/null 2>&1; then return 1; fi
     fi
     return 0
 }
@@ -512,12 +516,12 @@ apply_real_cert() {
         fi
     fi
     
-    if [ "$OS_TYPE" == "synology" ]; then
-        RELOAD_CMD="pkill -f sing-box; nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &"
+    if has_systemd; then
+        RELOAD_CMD="systemctl restart sing-box"
     elif [ "$OS_TYPE" == "alpine" ]; then
         RELOAD_CMD="rc-service sing-box restart"
     else
-        RELOAD_CMD="systemctl restart sing-box"
+        RELOAD_CMD="pkill -f sing-box; nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &"
     fi
     
     if ! ~/.acme.sh/acme.sh --installcert -d ${NEW_DOMAIN} \
@@ -536,7 +540,7 @@ apply_real_cert() {
 
 generate_self_cert() {
     if ! command -v openssl >/dev/null 2>&1; then
-        echo -e "${RED}系统缺少 openssl，群晖如未自带请安装相关套件。正在尝试自动修复...${PLAIN}"
+        echo -e "${RED}系统缺少 openssl，群晖等环境如未自带请手动安装。正在尝试自动修复...${PLAIN}"
         if [ "$OS_TYPE" == "alpine" ]; then apk add openssl; elif [ "$OS_TYPE" == "centos" ]; then yum install -y openssl || dnf install -y openssl; elif [ "$OS_TYPE" == "debian" ]; then apt-get install -y openssl; fi
         if ! command -v openssl >/dev/null 2>&1; then
             echo -e "${RED}openssl 自动安装失败，请手动安装后重试！${PLAIN}"
@@ -1013,10 +1017,23 @@ add_config() {
                         fi
                     fi
                     
-                    # 适配群晖：剥离 Systemd 改用 nohup
-                    if [ "$OS_TYPE" == "synology" ]; then
-                        pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
-                        nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token "${ARGO_TOKEN}" > /tmp/cloudflared-${TAG}.log 2>&1 &
+                    # ==== 新增：cloudflared 的三模守护启动 ====
+                    if has_systemd; then
+                        cat > "/etc/systemd/system/cloudflared-${TAG}.service" << 'EOF'
+[Unit]
+Description=cloudflared tunnel for @@SB_TAG@@
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token @@SB_TOKEN@@
+Restart=on-failure
+RestartSec=10s
+[Install]
+WantedBy=multi-user.target
+EOF
+                        sed -i "s|@@SB_TAG@@|${TAG}|g" "/etc/systemd/system/cloudflared-${TAG}.service"
+                        sed -i "s|@@SB_TOKEN@@|${ARGO_TOKEN}|g" "/etc/systemd/system/cloudflared-${TAG}.service"
+                        systemctl daemon-reload >/dev/null 2>&1
+                        systemctl enable "cloudflared-${TAG}" --now >/dev/null 2>&1
                     elif [ "$OS_TYPE" == "alpine" ]; then
                         cat > "/etc/init.d/cloudflared-${TAG}" << 'EOF'
 #!/sbin/openrc-run
@@ -1033,21 +1050,8 @@ EOF
                         rc-update add "cloudflared-${TAG}" default >/dev/null 2>&1
                         rc-service "cloudflared-${TAG}" restart >/dev/null 2>&1
                     else
-                        cat > "/etc/systemd/system/cloudflared-${TAG}.service" << 'EOF'
-[Unit]
-Description=cloudflared tunnel for @@SB_TAG@@
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token @@SB_TOKEN@@
-Restart=on-failure
-RestartSec=10s
-[Install]
-WantedBy=multi-user.target
-EOF
-                        sed -i "s|@@SB_TAG@@|${TAG}|g" "/etc/systemd/system/cloudflared-${TAG}.service"
-                        sed -i "s|@@SB_TOKEN@@|${ARGO_TOKEN}|g" "/etc/systemd/system/cloudflared-${TAG}.service"
-                        systemctl daemon-reload >/dev/null 2>&1
-                        systemctl enable "cloudflared-${TAG}" --now >/dev/null 2>&1
+                        pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+                        nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token "${ARGO_TOKEN}" > /tmp/cloudflared-${TAG}.log 2>&1 &
                     fi
                 fi
                 ;;
@@ -1069,17 +1073,17 @@ EOF
             remove_secret "ARGO_IP_${PORT}"
             remove_secret "ARGO_DOMAIN_${PORT}"
             if [ "$IS_ARGO" -eq 1 ]; then
-                if [ "$OS_TYPE" == "synology" ]; then
-                    pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+                if has_systemd; then
+                    systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
+                    systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
+                    rm -f "/etc/systemd/system/cloudflared-${TAG}.service"
+                    systemctl daemon-reload >/dev/null 2>&1
                 elif [ "$OS_TYPE" == "alpine" ]; then
                     rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                     rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
                     rm -f "/etc/init.d/cloudflared-${TAG}"
                 else
-                    systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
-                    systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
-                    rm -f "/etc/systemd/system/cloudflared-${TAG}.service"
-                    systemctl daemon-reload >/dev/null 2>&1
+                    pkill -f "cloudflared.*${TAG}" >/dev/null 2>&1 || true
                 fi
             fi
             pause
@@ -1323,10 +1327,13 @@ modify_config() {
                     mv ${CONFIG_FILE}.bak $CONFIG_FILE
                 else
                     if [ "$IS_ARGO" -eq 1 ]; then
-                        if [ "$OS_TYPE" == "synology" ]; then
-                            pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
-                            # 对于群晖，重启 cloudflared 需要重新解析 token，较为复杂，建议此处手动重启脚本或重启系统。
-                            echo -e "${YELLOW}请注意，Argo 节点名称已更改，您可能需要重启服务使进程生效。${PLAIN}"
+                        if has_systemd; then
+                            systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
+                            systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
+                            mv "/etc/systemd/system/cloudflared-${TAG}.service" "/etc/systemd/system/cloudflared-${NEW_TAG}.service"
+                            sed -i "s|tunnel for ${TAG}|tunnel for ${NEW_TAG}|g" "/etc/systemd/system/cloudflared-${NEW_TAG}.service"
+                            systemctl daemon-reload >/dev/null 2>&1
+                            systemctl enable "cloudflared-${NEW_TAG}" --now >/dev/null 2>&1
                         elif [ "$OS_TYPE" == "alpine" ]; then
                             rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                             rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
@@ -1336,12 +1343,8 @@ modify_config() {
                             rc-update add "cloudflared-${NEW_TAG}" default >/dev/null 2>&1
                             rc-service "cloudflared-${NEW_TAG}" start >/dev/null 2>&1
                         else
-                            systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
-                            systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
-                            mv "/etc/systemd/system/cloudflared-${TAG}.service" "/etc/systemd/system/cloudflared-${NEW_TAG}.service"
-                            sed -i "s|tunnel for ${TAG}|tunnel for ${NEW_TAG}|g" "/etc/systemd/system/cloudflared-${NEW_TAG}.service"
-                            systemctl daemon-reload >/dev/null 2>&1
-                            systemctl enable "cloudflared-${NEW_TAG}" --now >/dev/null 2>&1
+                            pkill -f "cloudflared.*${TAG}" >/dev/null 2>&1 || true
+                            echo -e "${YELLOW}请注意，Argo 节点名称已更改，若服务未自动重连，请重启系统使其生效。${PLAIN}"
                         fi
                     fi
                     echo -e "${GREEN}节点名称已成功更改为: $NEW_TAG${PLAIN}"
@@ -1414,17 +1417,17 @@ del_config() {
         fi
         
         if [ "$IS_ARGO" -eq 1 ]; then
-            if [ "$OS_TYPE" == "synology" ]; then
-                pkill -f "cloudflared-${TAG}" >/dev/null 2>&1 || true
+            if has_systemd; then
+                systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
+                systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
+                rm -f "/etc/systemd/system/cloudflared-${TAG}.service"
+                systemctl daemon-reload >/dev/null 2>&1
             elif [ "$OS_TYPE" == "alpine" ]; then
                 rc-service "cloudflared-${TAG}" stop >/dev/null 2>&1
                 rc-update del "cloudflared-${TAG}" default >/dev/null 2>&1
                 rm -f "/etc/init.d/cloudflared-${TAG}"
             else
-                systemctl stop "cloudflared-${TAG}" >/dev/null 2>&1
-                systemctl disable "cloudflared-${TAG}" >/dev/null 2>&1
-                rm -f "/etc/systemd/system/cloudflared-${TAG}.service"
-                systemctl daemon-reload >/dev/null 2>&1
+                pkill -f "cloudflared.*${TAG}" >/dev/null 2>&1 || true
             fi
         fi
         
@@ -1501,17 +1504,21 @@ run_manage() {
                    local INBOUND_COUNT=$(jq '.inbounds | length' $CONFIG_FILE 2>/dev/null)
                    if [ -z "$INBOUND_COUNT" ] || [ "$INBOUND_COUNT" -eq 0 ]; then echo -e "${RED}未添加节点配置！${PLAIN}"; pause; break; fi
                    if [ "$run_idx" == "1" ]; then
-                       if [ "$OS_TYPE" == "synology" ]; then
+                       if has_systemd; then systemctl start sing-box
+                       elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box start
+                       else 
                            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
                            nohup /usr/local/bin/sing-box run -c $CONFIG_FILE > /tmp/sing-box.log 2>&1 &
-                       elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box start; else systemctl start sing-box; fi
+                       fi
                        echo -e "${GREEN}已启动${PLAIN}"
                    else
                        restart_service; echo -e "${GREEN}已重启${PLAIN}"
                    fi
                    pause; break ;;
                 2) 
-                   if [ "$OS_TYPE" == "synology" ]; then pkill -f /usr/local/bin/sing-box; elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop; else systemctl stop sing-box; fi
+                   if has_systemd; then systemctl stop sing-box
+                   elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop
+                   else pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true; fi
                    echo -e "${GREEN}已停止${PLAIN}"; pause; break ;;
                 0) return ;;
                 *) echo -e "${RED}输入错误!${PLAIN}" ;;
@@ -1553,9 +1560,10 @@ update_manage() {
                     local UP_TMP=$(mktemp -d)
                     if wget --show-progress -qO $UP_TMP/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${NEW_VER}/sing-box-${NEW_VER}-linux-${SB_ARCH}.tar.gz" || curl -sL -o $UP_TMP/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${NEW_VER}/sing-box-${NEW_VER}-linux-${SB_ARCH}.tar.gz"; then
                         if tar -xzf $UP_TMP/sb.tar.gz -C $UP_TMP; then
-                            if [ "$OS_TYPE" == "synology" ]; then
-                                pkill -f /usr/local/bin/sing-box >/dev/null 2>&1
-                            elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop >/dev/null 2>&1; else systemctl stop sing-box >/dev/null 2>&1; fi
+                            if has_systemd; then systemctl stop sing-box >/dev/null 2>&1
+                            elif [ "$OS_TYPE" == "alpine" ]; then rc-service sing-box stop >/dev/null 2>&1
+                            else pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true; fi
+                            
                             rm -f /usr/local/bin/sing-box
                             mv $UP_TMP/sing-box-${NEW_VER}-linux-${SB_ARCH}/sing-box /usr/local/bin/sing-box
                             chmod +x /usr/local/bin/sing-box
@@ -1738,9 +1746,14 @@ uninstall_all() {
     read -p "确认卸载脚本、sing-box和所有节点配置吗？(y/n): " un
     if [[ "$un" == "y" ]]; then
         remove_all_fw_rules
-        if [ "$OS_TYPE" == "synology" ]; then
-            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1
-            pkill -f cloudflared >/dev/null 2>&1
+        if has_systemd; then
+            systemctl stop sing-box >/dev/null 2>&1
+            systemctl disable sing-box >/dev/null 2>&1
+            rm -f /etc/systemd/system/sing-box.service
+            for f in /etc/systemd/system/cloudflared-*.service; do
+                if [ -f "$f" ]; then svc=$(basename "$f"); systemctl stop "$svc" >/dev/null 2>&1; systemctl disable "$svc" >/dev/null 2>&1; rm -f "$f"; fi
+            done
+            systemctl daemon-reload >/dev/null 2>&1
         elif [ "$OS_TYPE" == "alpine" ]; then
             rc-service sing-box stop >/dev/null 2>&1
             rc-update del sing-box default >/dev/null 2>&1
@@ -1749,13 +1762,8 @@ uninstall_all() {
                 if [ -f "$f" ]; then svc=$(basename "$f"); rc-service "$svc" stop >/dev/null 2>&1; rc-update del "$svc" default >/dev/null 2>&1; rm -f "$f"; fi
             done
         else
-            systemctl stop sing-box >/dev/null 2>&1
-            systemctl disable sing-box >/dev/null 2>&1
-            rm -f /etc/systemd/system/sing-box.service
-            for f in /etc/systemd/system/cloudflared-*.service; do
-                if [ -f "$f" ]; then svc=$(basename "$f"); systemctl stop "$svc" >/dev/null 2>&1; systemctl disable "$svc" >/dev/null 2>&1; rm -f "$f"; fi
-            done
-            systemctl daemon-reload >/dev/null 2>&1
+            pkill -f /usr/local/bin/sing-box >/dev/null 2>&1 || true
+            pkill -f cloudflared >/dev/null 2>&1 || true
         fi
         
         if [ -f "$HOME/.acme.sh/acme.sh" ]; then
@@ -1784,13 +1792,13 @@ menu() {
     
     while true; do
         clear
-        if [ "$OS_TYPE" == "synology" ]; then
-            if pgrep -f /usr/local/bin/sing-box >/dev/null; then SB_STATUS="active"; else SB_STATUS="stopped"; fi
+        if has_systemd; then
+            SB_STATUS=$(systemctl is-active sing-box 2>/dev/null)
         elif [ "$OS_TYPE" == "alpine" ]; then
             SB_STATUS=$(rc-service sing-box status 2>/dev/null | grep -o 'started')
             [ "$SB_STATUS" == "started" ] && SB_STATUS="active" || SB_STATUS="stopped"
         else
-            SB_STATUS=$(systemctl is-active sing-box 2>/dev/null)
+            if pgrep -f /usr/local/bin/sing-box >/dev/null; then SB_STATUS="active"; else SB_STATUS="stopped"; fi
         fi
         [ "$SB_STATUS" == "active" ] && ST_COLOR=$GREEN || ST_COLOR=$RED
         
@@ -1803,8 +1811,11 @@ menu() {
             VER_SHOW="未安装"
         fi
         
-        echo -e "------------- sing-box 管理脚本 (群晖特供) -------------"
-        echo -e "架构环境: ${YELLOW}${SB_ARCH}${PLAIN}"
+        local DAEMON_TYPE="Nohup 守护"
+        if has_systemd; then DAEMON_TYPE="Systemd 守护"; elif [ "$OS_TYPE" == "alpine" ]; then DAEMON_TYPE="OpenRC 守护"; fi
+        
+        echo -e "------------- sing-box 智能托管脚本 -------------"
+        echo -e "架构环境: ${YELLOW}${SB_ARCH}${PLAIN} (${CYAN}${DAEMON_TYPE}${PLAIN})"
         echo -e "sing-box ${VER_SHOW}: ${ST_COLOR}${SB_STATUS}${PLAIN}\n"
         echo -e " 1) 添加节点"
         echo -e " 2) 更改节点"
